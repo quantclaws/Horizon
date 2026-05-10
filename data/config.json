@@ -33,27 +33,99 @@
       },
       {
         "type": "repo_releases",
+        "owner": "pola-rs",
+        "repo": "polars",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "vnpy",
+        "repo": "vnpy",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "backtrader",
+        "repo": "backtrader",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "quantopian",
+        "repo": "zipline-reloaded",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "twopirllc",
+        "repo": "pandas-ta",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "mrjbq7",
+        "repo": "ta-lib",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "optuna",
+        "repo": "optuna",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "timescale",
+        "repo": "timescaledb",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "ClickHouse",
+        "repo": "ClickHouse",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "duckdb",
+        "repo": "duckdb",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "FinRL-Library",
+        "repo": "FinRL",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "man-group",
+        "repo": "Arctic",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
+        "owner": "influxdata",
+        "repo": "influxdb",
+        "enabled": true
+      },
+      {
+        "type": "repo_releases",
         "owner": "vllm-project",
         "repo": "vllm",
         "enabled": true
       },
       {
         "type": "repo_releases",
-        "owner": "sgl-project",
-        "repo": "sglang",
-        "enabled": true
-      },
-      {
-        "type": "repo_releases",
-        "owner": "triton-lang",
-        "repo": "triton",
+        "owner": "huggingface",
+        "repo": "transformers",
         "enabled": true
       }
     ],
     "hackernews": {
       "enabled": true,
       "fetch_top_stories": 30,
-      "min_score": 150
+      "min_score": 100
     },
     "rss": [
       {
@@ -63,56 +135,80 @@
         "category": "ai-tools"
       },
       {
+        "name": "arXiv Quantitative Finance",
+        "url": "http://export.arxiv.org/rss/q-fin",
+        "enabled": true,
+        "category": "quant-papers"
+      },
+      {
+        "name": "Papers With Code",
+        "url": "https://paperswithcode.com/rss",
+        "enabled": true,
+        "category": "ml-papers"
+      },
+      {
         "name": "GitHub Trending - Daily",
         "url": "https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml",
         "enabled": true,
         "category": "github-trending"
-      },
-      {
-        "name": "LWN.net",
-        "url": "https://lwn.net/headlines/full_text?key=${LWN_KEY}",
-        "enabled": true,
-        "category": "linux-kernel"
       }
     ],
     "reddit": {
       "enabled": true,
       "subreddits": [
         {
-          "subreddit": "MachineLearning",
+          "subreddit": "algotrading",
           "enabled": true,
           "sort": "hot",
           "time_filter": "day",
           "fetch_limit": 15,
-          "min_score": 60
+          "min_score": 10
+        },
+        {
+          "subreddit": "quantfinance",
+          "enabled": true,
+          "sort": "hot",
+          "time_filter": "day",
+          "fetch_limit": 15,
+          "min_score": 10
+        },
+        {
+          "subreddit": "quant",
+          "enabled": true,
+          "sort": "hot",
+          "time_filter": "day",
+          "fetch_limit": 15,
+          "min_score": 10
+        },
+        {
+          "subreddit": "MachineLearning",
+          "enabled": true,
+          "sort": "hot",
+          "time_filter": "day",
+          "fetch_limit": 10,
+          "min_score": 50
         },
         {
           "subreddit": "LocalLLaMA",
           "enabled": true,
           "sort": "hot",
           "time_filter": "day",
-          "fetch_limit": 15,
-          "min_score": 60
+          "fetch_limit": 10,
+          "min_score": 30
         }
       ],
       "users": [],
-      "fetch_comments": 10
+      "fetch_comments": 5
     },
     "telegram": {
-      "enabled": true,
-      "channels": [
-        {
-          "channel": "zaihuapd",
-          "enabled": true,
-          "fetch_limit": 20
-        }
-      ]
+      "enabled": false,
+      "channels": []
     },
     "twitter": {
       "enabled": true,
       "users": [
         "karpathy",
-        "roifex"
+        "ylecun"
       ],
       "fetch_limit": 10,
       "fetch_reply_text": false,
