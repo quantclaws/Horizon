@@ -1,13 +1,15 @@
-"""Twitter scraper using Apify altimis/scweet actor."""
+"""Twitter scraper using Camoufox browser with persistent cookies."""
 
 import asyncio
+import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from html import unescape
+from pathlib import Path
 from typing import List, Optional
 
-from dateutil.parser import isoparse
 import httpx
 
 from .base import BaseScraper
@@ -15,17 +17,31 @@ from ..models import ContentItem, SourceType, TwitterConfig
 
 logger = logging.getLogger(__name__)
 
-_APIFY_BASE = "https://api.apify.com/v2"
-_POLL_INTERVAL = 3.0
-_MAX_WAIT = 180
+# Camoufox site-packages path (shared with content-factory venv)
+_CAMOUFOX_SITE = "/Users/openclaw/workspace/content-factory/venv/lib/python3.14/site-packages"
+
+# Cookie storage path
+_COOKIE_PATH = Path("data/twitter_cookies.json")
+
+# Default proxy from environment
+_DEFAULT_PROXY = os.environ.get("CAMOUFOX_PROXY", "http://127.0.0.1:7890")
+
+
+def _ensure_camoufox_path():
+    """Add camoufox to sys.path if needed."""
+    import sys
+
+    if _CAMOUFOX_SITE not in sys.path:
+        sys.path.insert(0, _CAMOUFOX_SITE)
 
 
 class TwitterScraper(BaseScraper):
-    """Fetch tweets via the Apify altimis/scweet actor."""
+    """Fetch tweets via Camoufox browser with cookie persistence."""
 
     def __init__(self, config: TwitterConfig, http_client: httpx.AsyncClient):
         super().__init__(config, http_client)
         self.config = config
+        _ensure_camoufox_path()
 
     async def fetch(self, since: datetime) -> List[ContentItem]:
         if not self.config.enabled:
@@ -36,171 +52,350 @@ class TwitterScraper(BaseScraper):
             logger.debug("No Twitter users configured, skipping.")
             return []
 
-        token = os.environ.get(self.config.apify_token_env)
-        if not token:
-            logger.warning(
-                f"Apify token not found in env var '{self.config.apify_token_env}'. Skipping Twitter."
-            )
-            return []
+        logger.info(f"Fetching Twitter (Camoufox) for users: {users}")
 
-        logger.info(f"Fetching Twitter (Apify) for users: {users}")
-
-        run_id, dataset_id = await self._start_run(token, users)
-        if not run_id:
-            return []
-
-        succeeded = await self._wait_for_run(token, run_id)
-        if not succeeded:
-            return []
-
-        raw_items = await self._fetch_dataset(token, dataset_id)
-        items = []
-        for raw in raw_items:
-            if isinstance(raw, dict) and raw.get("noResults"):
-                continue
-            parsed = self._parse_item(raw, since)
-            if parsed:
-                items.append(parsed)
-
-        logger.info(f"Fetched {len(items)} tweets via Apify.")
+        # Run blocking camoufox code in thread pool
+        loop = asyncio.get_event_loop()
+        items = await loop.run_in_executor(
+            None, self._fetch_sync, users, since
+        )
+        logger.info(f"Fetched {len(items)} tweets via Camoufox.")
         return items
 
-    async def _start_run(
-        self, token: str, users: List[str]
-    ) -> tuple[Optional[str], Optional[str]]:
-        payload = {
-            "source_mode": "profiles",
-            "profile_urls": users,
-            "search_sort": "Latest",
-            "max_items": max(100, self.config.fetch_limit),
-        }
-        url = f"{_APIFY_BASE}/acts/{self.config.actor_id}/runs?token={token}"
+    def _fetch_sync(self, users: List[str], since: datetime) -> List[ContentItem]:
+        """Synchronous fetch using Camoufox."""
         try:
-            resp = await self.client.post(url, json=payload, timeout=30.0)
-            resp.raise_for_status()
-            data = resp.json()["data"]
-            run_id = data["id"]
-            dataset_id = data["defaultDatasetId"]
-            logger.debug(f"Started Apify run {run_id}, dataset {dataset_id}")
-            return run_id, dataset_id
-        except Exception as exc:
-            logger.error(f"Failed to start Apify run: {exc}")
-            return None, None
-
-    async def _wait_for_run(self, token: str, run_id: str) -> bool:
-        url = f"{_APIFY_BASE}/actor-runs/{run_id}?token={token}"
-        elapsed = 0.0
-        while elapsed < _MAX_WAIT:
-            try:
-                resp = await self.client.get(url, timeout=10.0)
-                resp.raise_for_status()
-                status = resp.json()["data"]["status"]
-                if status == "SUCCEEDED":
-                    return True
-                if status in ("FAILED", "ABORTED", "TIMED-OUT"):
-                    logger.error(f"Apify run {run_id} ended with status: {status}")
-                    return False
-            except Exception as exc:
-                logger.warning(f"Error polling Apify run {run_id}: {exc}")
-            await asyncio.sleep(_POLL_INTERVAL)
-            elapsed += _POLL_INTERVAL
-        logger.warning(f"Apify run {run_id} timed out after {_MAX_WAIT}s.")
-        return False
-
-    async def _fetch_dataset(self, token: str, dataset_id: str) -> list:
-        url = f"{_APIFY_BASE}/datasets/{dataset_id}/items?token={token}"
-        try:
-            resp = await self.client.get(url, timeout=30.0)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as exc:
-            logger.error(f"Failed to fetch Apify dataset {dataset_id}: {exc}")
+            from camoufox.sync_api import Camoufox
+        except ImportError:
+            logger.error("Camoufox not available. Install it in the content-factory venv.")
             return []
+
+        all_items: List[ContentItem] = []
+        proxy = {"server": _DEFAULT_PROXY}
+
+        with Camoufox(headless=True, proxy=proxy) as browser:
+            # Load cookies if available
+            storage_state = self._load_storage_state()
+            context = browser.new_context(storage_state=storage_state)
+            page = context.new_page()
+
+            for user in users:
+                try:
+                    user_items = self._fetch_user_sync(page, user, since)
+                    all_items.extend(user_items)
+                except Exception as exc:
+                    logger.warning(f"Error fetching Twitter user {user}: {exc}")
+
+            # Save cookies for next run
+            self._save_storage_state(context)
+            context.close()
+
+        return all_items
+
+    def _fetch_user_sync(
+        self, page, user: str, since: datetime
+    ) -> List[ContentItem]:
+        """Fetch tweets for a single user."""
+        url = f"https://twitter.com/{user}"
+        logger.debug(f"Navigating to {url}")
+
+        page.goto(url, timeout=120000, wait_until="networkidle")
+        page.wait_for_timeout(10000)
+
+        # Wait for tweets to appear
+        try:
+            page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
+        except Exception:
+            logger.warning(f"No tweets found for {user}")
+            return []
+
+        items: List[ContentItem] = []
+        seen_ids: set[str] = set()
+        max_scrolls = 10
+        no_new_count = 0
+
+        for _ in range(max_scrolls):
+            # Parse currently visible tweets
+            tweets = page.query_selector_all('article[data-testid="tweet"]')
+            new_found = 0
+
+            for tweet in tweets:
+                parsed = self._parse_tweet_element(tweet, user, since)
+                if parsed and parsed.id not in seen_ids:
+                    seen_ids.add(parsed.id)
+                    items.append(parsed)
+                    new_found += 1
+
+            # Check if we should continue scrolling
+            if len(items) >= self.config.fetch_limit:
+                break
+
+            if new_found == 0:
+                no_new_count += 1
+                if no_new_count >= 2:
+                    break
+            else:
+                no_new_count = 0
+
+            # Scroll down to load more
+            page.evaluate("window.scrollBy(0, 800)")
+            page.wait_for_timeout(2000)
+
+        return items[: self.config.fetch_limit]
+
+    def _parse_tweet_element(
+        self, tweet, user: str, since: datetime
+    ) -> Optional[ContentItem]:
+        """Parse a single tweet DOM element into ContentItem."""
+        try:
+            # Extract tweet text
+            text_el = tweet.query_selector('[data-testid="tweetText"]')
+            if not text_el:
+                return None
+            text = text_el.inner_text().strip()
+            if not text:
+                return None
+            text = unescape(text)
+
+            # Extract tweet URL (from time link)
+            time_el = tweet.query_selector("time")
+            tweet_url = ""
+            published_at = datetime.now(timezone.utc)
+
+            if time_el:
+                datetime_attr = time_el.get_attribute("datetime")
+                if datetime_attr:
+                    try:
+                        published_at = datetime.fromisoformat(
+                            datetime_attr.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        pass
+
+                # Find parent link for tweet URL
+                time_link = time_el.evaluate("el => el.closest('a')?.href")
+                if time_link:
+                    tweet_url = time_link
+
+            # Filter by time
+            if published_at < since:
+                return None
+
+            # Extract author
+            author_el = tweet.query_selector('[data-testid="User-Name"]')
+            author = user
+            screen_name = user
+            if author_el:
+                author_text = author_el.inner_text().strip()
+                # Format: "Display Name\n@handle"
+                parts = author_text.split("\n")
+                if len(parts) >= 2:
+                    author = parts[0].strip()
+                    screen_name = parts[1].strip().lstrip("@")
+
+            # Extract engagement metrics
+            metrics = self._extract_metrics(tweet)
+
+            # Generate tweet ID from URL or content hash
+            tweet_id = self._extract_tweet_id(tweet_url) or str(hash(text))
+
+            # Build title
+            title_body = text[:50].replace("\n", " ").strip()
+            if len(text) > 50:
+                title_body += "..."
+
+            if not tweet_url:
+                tweet_url = f"https://twitter.com/{screen_name}/status/{tweet_id}"
+
+            return ContentItem(
+                id=self._generate_id(SourceType.TWITTER.value, "tweet", tweet_id),
+                source_type=SourceType.TWITTER,
+                title=f"@{screen_name}: {title_body}",
+                url=tweet_url,
+                content=text,
+                author=author,
+                published_at=published_at,
+                metadata={
+                    "tweet_id": tweet_id,
+                    "favorite_count": metrics.get("likes", 0),
+                    "retweet_count": metrics.get("retweets", 0),
+                    "reply_count": metrics.get("replies", 0),
+                    "view_count": metrics.get("views"),
+                },
+            )
+        except Exception as exc:
+            logger.debug(f"Failed to parse tweet: {exc}")
+            return None
+
+    def _extract_metrics(self, tweet) -> dict:
+        """Extract engagement metrics from tweet element."""
+        metrics = {"likes": 0, "retweets": 0, "replies": 0, "views": None}
+
+        # Find all metric buttons in the action bar
+        buttons = tweet.query_selector_all('[role="group"] button, [role="group"] a')
+
+        for btn in buttons:
+            testid = btn.get_attribute("data-testid") or ""
+            aria = btn.get_attribute("aria-label") or ""
+
+            # Parse raw number from aria-label (e.g. "68006 Likes. Like")
+            num = self._parse_metric_from_aria(aria)
+
+            if testid == "like":
+                metrics["likes"] = num
+            elif testid == "reply":
+                metrics["replies"] = num
+            elif testid == "retweet":
+                metrics["retweets"] = num
+            elif "views" in aria.lower() and "view post analytics" in aria.lower():
+                metrics["views"] = num
+
+        return metrics
+
+    @staticmethod
+    def _parse_metric_from_aria(aria: str) -> int:
+        """Parse raw number from aria-label like '68006 Likes. Like'."""
+        if not aria:
+            return 0
+        # Extract first number from the string
+        match = re.search(r"(\d+(?:,\d+)*)", aria)
+        if match:
+            return int(match.group(1).replace(",", ""))
+        return 0
+
+    @staticmethod
+    def _parse_metric_number(text: str) -> int:
+        """Parse metric string like '1.2K' or '5M' into number."""
+        text = text.strip().lower().replace(",", "")
+        if not text:
+            return 0
+
+        match = re.match(r"^([\d.]+)\s*([km]?)\b", text)
+        if not match:
+            return 0
+
+        num_str, suffix = match.groups()
+        try:
+            num = float(num_str)
+        except ValueError:
+            return 0
+
+        if suffix == "k":
+            num *= 1000
+        elif suffix == "m":
+            num *= 1000000
+
+        return int(num)
+
+    @staticmethod
+    def _extract_tweet_id(url: str) -> Optional[str]:
+        """Extract tweet ID from Twitter URL."""
+        if not url:
+            return None
+        match = re.search(r"/status/(\d+)", url)
+        return match.group(1) if match else None
+
+    def _load_storage_state(self) -> Optional[dict]:
+        """Load camoufox storage state (cookies + localStorage)."""
+        if _COOKIE_PATH.exists():
+            try:
+                with open(_COOKIE_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as exc:
+                logger.debug(f"Failed to load Twitter cookies: {exc}")
+        return None
+
+    def _save_storage_state(self, context):
+        """Save camoufox storage state for next run."""
+        try:
+            state = context.storage_state()
+            _COOKIE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(_COOKIE_PATH, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            logger.debug(f"Saved Twitter cookies to {_COOKIE_PATH}")
+        except Exception as exc:
+            logger.debug(f"Failed to save Twitter cookies: {exc}")
 
     async def fetch_replies_for_item(self, item: ContentItem) -> List[str]:
-        """Fetch reply texts for one tweet using scweet search mode."""
+        """Fetch reply texts for one tweet."""
         if not self.config.fetch_reply_text:
-            return []
-
-        token = os.environ.get(self.config.apify_token_env)
-        if not token:
-            return []
-
-        conversation_id = str(item.metadata.get("conversation_id") or "")
-        if not conversation_id:
             return []
 
         max_replies = max(self.config.max_replies_per_tweet, 0)
         if max_replies == 0:
             return []
 
-        max_items = max(100, max_replies * 5)
-        payload = {
-            "source_mode": "search",
-            "search_query": f"conversation_id:{conversation_id}",
-            "search_sort": "Latest",
-            "max_items": max_items,
-        }
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, self._fetch_replies_sync, item, max_replies
+        )
 
-        url = f"{_APIFY_BASE}/acts/{self.config.actor_id}/runs?token={token}"
+    def _fetch_replies_sync(self, item: ContentItem, max_replies: int) -> List[str]:
+        """Synchronous reply fetch using Camoufox."""
         try:
-            resp = await self.client.post(url, json=payload, timeout=30.0)
-            resp.raise_for_status()
-            data = resp.json()["data"]
-            run_id = data["id"]
-            dataset_id = data["defaultDatasetId"]
-        except Exception as exc:
-            logger.warning(f"Failed to start replies run for {item.id}: {exc}")
+            from camoufox.sync_api import Camoufox
+        except ImportError:
             return []
 
-        if not await self._wait_for_run(token, run_id):
-            return []
+        tweet_url = str(item.url)
+        proxy = {"server": _DEFAULT_PROXY}
+        reply_lines: List[str] = []
 
-        rows = await self._fetch_dataset(token, dataset_id)
-        return self._extract_reply_lines(item, rows, max_replies)
+        with Camoufox(headless=True, proxy=proxy) as browser:
+            storage_state = self._load_storage_state()
+            context = browser.new_context(storage_state=storage_state)
+            page = context.new_page()
 
-    def _extract_reply_lines(self, item: ContentItem, rows: list, max_replies: int) -> List[str]:
-        """Convert scweet rows into compact reply lines."""
-        min_likes = max(self.config.reply_min_likes, 0)
-        tweet_id = str(item.metadata.get("tweet_id") or "")
-        own_author = (item.author or "").lstrip("@")
-        candidates = []
+            try:
+                page.goto(tweet_url, timeout=120000, wait_until="domcontentloaded")
+                page.wait_for_timeout(5000)
 
-        for row in rows:
-            if not isinstance(row, dict) or row.get("noResults"):
-                continue
+                # Look for reply tweets
+                replies = page.query_selector_all('article[data-testid="tweet"]')
+                min_likes = max(self.config.reply_min_likes, 0)
+                candidates = []
 
-            row_id = str(row.get("id") or "")
-            if row_id.startswith("tweet-"):
-                row_id = row_id[6:]
-            if tweet_id and row_id == tweet_id:
-                continue
+                for reply in replies[1:]:  # Skip first (original tweet)
+                    try:
+                        text_el = reply.query_selector('[data-testid="tweetText"]')
+                        if not text_el:
+                            continue
+                        text = text_el.inner_text().strip()
+                        if not text:
+                            continue
 
-            user = row.get("user") or {}
-            handle = (
-                user.get("handle")
-                or row.get("handle")
-                or user.get("username")
-                or "unknown"
-            )
-            if handle and own_author and handle.lower() == own_author.lower():
-                continue
+                        author_el = reply.query_selector('[data-testid="User-Name"]')
+                        handle = "unknown"
+                        if author_el:
+                            author_text = author_el.inner_text().strip()
+                            parts = author_text.split("\n")
+                            if len(parts) >= 2:
+                                handle = parts[1].strip().lstrip("@")
 
-            text = unescape((row.get("text") or "").strip())
-            if not text:
-                continue
+                        # Skip original author
+                        if handle == (item.author or "").lstrip("@"):
+                            continue
 
-            likes = int(row.get("favorite_count") or 0)
-            replies = int(row.get("reply_count") or 0)
-            if likes < min_likes:
-                continue
+                        metrics = self._extract_metrics(reply)
+                        likes = metrics.get("likes", 0)
+                        if likes < min_likes:
+                            continue
 
-            score = likes * 2 + replies
-            line = f"[@{handle} | ❤️ {likes} | 💬 {replies}] {text[:280]}"
-            candidates.append((score, line))
+                        line = f"[@{handle} | ❤️ {likes}] {text[:280]}"
+                        candidates.append((likes, line))
+                    except Exception:
+                        continue
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return [line for _, line in candidates[:max_replies]]
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                reply_lines = [line for _, line in candidates[:max_replies]]
+
+            except Exception as exc:
+                logger.warning(f"Failed to fetch replies for {item.id}: {exc}")
+            finally:
+                self._save_storage_state(context)
+                context.close()
+
+        return reply_lines
 
     @staticmethod
     def append_discussion_content(item: ContentItem, reply_lines: List[str]) -> bool:
@@ -223,91 +418,3 @@ class TwitterScraper(BaseScraper):
         else:
             item.content = f"{marker}\n" + block
         return True
-
-    def _parse_item(self, item: dict, since: datetime) -> Optional[ContentItem]:
-        try:
-            created_at_str = item.get("created_at")
-            if not created_at_str:
-                return None
-
-            try:
-                published_at = datetime.strptime(
-                    created_at_str, "%a %b %d %H:%M:%S %z %Y"
-                )
-            except ValueError:
-                published_at = isoparse(created_at_str)
-
-            if published_at.tzinfo is None:
-                published_at = published_at.replace(tzinfo=timezone.utc)
-
-            if published_at < since:
-                return None
-
-            tweet_id = str(item.get("id_str") or item.get("id") or "")
-            if not tweet_id:
-                return None
-
-            # Normalize tweet_id: scweet prefixes with "tweet-"
-            raw_id = item.get("id") or ""
-            numeric_id = (
-                str(raw_id).replace("tweet-", "")
-                if str(raw_id).startswith("tweet-")
-                else tweet_id
-            )
-            conversation_id = str(
-                item.get("conversation_id")
-                or item.get("tweet", {}).get("conversation_id")
-                or numeric_id
-            )
-
-            user = item.get("user") or {}
-            screen_name = (
-                user.get("screen_name")
-                or user.get("username")
-                or user.get("handle")
-                or item.get("handle")
-                or item.get("username")
-                or "unknown"
-            )
-            author = user.get("name") or screen_name
-
-            text = item.get("full_text") or item.get("text") or ""
-            if not text:
-                return None
-            text = unescape(text)
-
-            url = item.get("url")
-            if not url:
-                permalink = item.get("permalink")
-                if permalink and screen_name != "unknown":
-                    url = f"https://twitter.com/{screen_name}{permalink}"
-                else:
-                    url = f"https://twitter.com/{screen_name}/status/{tweet_id}"
-
-            title_body = text[:50].replace("\n", " ").strip()
-            if len(text) > 50:
-                title_body += "..."
-
-            return ContentItem(
-                id=self._generate_id(SourceType.TWITTER.value, "tweet", numeric_id),
-                source_type=SourceType.TWITTER,
-                title=f"@{screen_name}: {title_body}",
-                url=url,
-                content=text,
-                author=author,
-                published_at=published_at,
-                metadata={
-                    "tweet_id": numeric_id,
-                    "conversation_id": conversation_id,
-                    "favorite_count": item.get("favorite_count", 0),
-                    "retweet_count": item.get("retweet_count", 0),
-                    "reply_count": item.get("reply_count", 0),
-                    "view_count": item.get("view_count"),
-                    "is_reply": item.get("is_reply", False),
-                    "in_reply_to_status_id": item.get("in_reply_to_status_id"),
-                    "in_reply_to_screen_name": item.get("in_reply_to_screen_name"),
-                },
-            )
-        except Exception as exc:
-            logger.debug(f"Failed to parse tweet: {exc}")
-            return None
