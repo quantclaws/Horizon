@@ -2,15 +2,27 @@
   "version": "1.0",
   "ai": {
     "provider": "openai",
-    "model": "deepseek-v4-flash",
-    "base_url": "https://api.deepseek.com",
-    "api_key_env": "OPENAI_API_KEY",
+    "model": "nvidia/nemotron-3-super-120b-a12b:free",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
     "temperature": 0.3,
     "max_tokens": 8192,
     "languages": [
       "zh",
       "en"
     ]
+  },
+  "email": {
+    "enabled": true,
+    "smtp_server": "smtp.qiye.aliyun.com",
+    "smtp_port": 465,
+    "imap_server": "imap.qiye.aliyun.com",
+    "imap_port": 993,
+    "email_address": "openclaw@quantide.cn",
+    "password_env": "EMAIL_PASSWORD",
+    "sender_name": "Horizon Daily",
+    "subscribe_keyword": "SUBSCRIBE",
+    "unsubscribe_keyword": "UNSUBSCRIBE"
   },
   "sources": {
     "github": [
@@ -114,7 +126,7 @@
     "time_window_hours": 24
   },
   "webhook": {
-    "enabled": true,
+    "enabled": false,
     "url_env": "HORIZON_WEBHOOK_URL",
     "delivery": "summary_and_items",
     "overview_position": "last",

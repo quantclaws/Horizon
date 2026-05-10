@@ -118,6 +118,12 @@ class OpenAIClient(AIClient):
         kwargs = {"api_key": api_key}
         if config.base_url:
             kwargs["base_url"] = config.base_url
+            # OpenRouter requires Referer and Title headers for ranking
+            if "openrouter.ai" in config.base_url:
+                kwargs["default_headers"] = {
+                    "HTTP-Referer": "https://github.com/Thysrael/Horizon",
+                    "X-Title": "Horizon",
+                }
 
         self.client = AsyncOpenAI(**kwargs)
         self.model = config.model
